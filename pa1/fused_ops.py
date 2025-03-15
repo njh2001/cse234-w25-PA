@@ -32,13 +32,37 @@ class MatMulLayerNormOp(Op):
     def compute(self, node: Node, input_values: List[torch.Tensor]) -> torch.Tensor:
         """Return the fused matmul and layer normalization result."""
         assert len(input_values) == 2
-        """TODO: your code here"""
-        raise NotImplementedError
+        a, b = input_values
+        mul = torch.matmul(a, b)
+        m = torch.mean(mul, dim=-1, keepdim=True)
+        v = torch.var(mul, dim=-1, keepdim=True, unbiased=False)
+
+        eps = node.attrs["eps"]
+        x = (mul - m) / torch.sqrt(v + eps)
+        return x
 
     def gradient(self, node: Node, output_grad: Node) -> List[Node]:
         """Given gradient of fused node, return partial adjoints to each input."""
-        """TODO: your code here"""
-        raise NotImplementedError
+
+        a, b = node.inputs
+        normalized_shape = node.attrs["normalized_shape"]
+        eps = node.attrs['eps']
+        dims = tuple(range(-len(normalized_shape), 0))
+
+        mul = matmul(a, b)
+        m = mean(mul, dim=dims, keepdim=True)
+        m2 = mean(power(mul, 2), dim=dims, keepdim=True)
+        var = m2 - power(m, 2)
+
+        normalized = (mul - m) / sqrt(var + eps)
+        g = output_grad
+        g_mean = mean(g, dim=dims, keepdim=True)
+        g_normalized_mean = mean(g * normalized, dim=dims, keepdim=True)
+        grad_x = (g - g_mean - normalized * g_normalized_mean) / sqrt(var + eps)
+
+        grad_A = matmul(grad_x, transpose(b, -1, -2))
+        grad_B = matmul(transpose(a, -1, -2), grad_x)
+        return [grad_A, grad_B]
 
 
 class MatMulSoftmaxOp(Op):
@@ -62,14 +86,23 @@ class MatMulSoftmaxOp(Op):
     def compute(self, node: Node, input_values: List[torch.Tensor]) -> torch.Tensor:
         """Return the fused matmul and softmax result."""
         assert len(input_values) == 2
-        """TODO: your code here"""
-        raise NotImplementedError
+        a, b = input_values
+        mul = torch.matmul(a, b)
+        return torch.exp(mul - mul.max(dim=node.dim, keepdim=True)[0]) / torch.exp(mul - mul.max(dim=node.dim, keepdim=True)[0]).sum(dim=node.dim, keepdim=True)
+        
 
     def gradient(self, node: Node, output_grad: Node) -> List[Node]:
         """Given gradient of fused node, return partial adjoints to each input."""
         # First compute the forward pass result we need for softmax gradient
-        """TODO: your code here"""
-        raise NotImplementedError
+        a, b = node.inputs
+        mul = matmul(a, b)
+        
+        softmax_val = softmax(mul, node.dim)
+        grad_x = softmax_val * (output_grad - sum_op(softmax_val * output_grad, dim=node.dim, keepdim=True))
+        
+        grad_A = matmul(grad_x, transpose(b, -1, -2))
+        grad_B = matmul(transpose(a, -1, -2), grad_x)
+        return [grad_A, grad_B]
 
 # Create global instances of the fused ops
 matmul_layernorm = MatMulLayerNormOp()
